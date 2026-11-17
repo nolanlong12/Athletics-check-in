@@ -4,12 +4,18 @@
 
   <form id="checkin-form">
     <label for="ci-id">Student ID</label>
-    <input type="text" id="ci-id" required placeholder="Your student ID">
+    <input type="text" id="ci-id" required placeholder="Enter your student ID" autocomplete="off">
 
-    <label for="ci-name">Name</label>
-    <input type="text" id="ci-name" required placeholder="Your full name">
+    <!-- Only shown the first time a student checks in -->
+    <div id="ci-new" hidden>
+      <p class="ci-note">First time here? Tell us your name so we remember you.</p>
+      <label for="ci-first">First name</label>
+      <input type="text" id="ci-first" placeholder="First name">
+      <label for="ci-last">Last name</label>
+      <input type="text" id="ci-last" placeholder="Last name">
+    </div>
 
-    <button type="submit">Check In</button>
+    <button type="submit" id="ci-button">Check In</button>
   </form>
 
   <p id="ci-message"></p>
@@ -21,9 +27,10 @@
 <style>
   #checkin { max-width: 400px; margin: 2rem auto; font-family: sans-serif; }
   #checkin label { display: block; margin-top: 1rem; font-weight: bold; }
-  #checkin input { width: 100%; padding: .6rem; margin-top: .3rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
+  #checkin input { width: 100%; padding: .6rem; margin-top: .3rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
   #checkin button { margin-top: 1rem; width: 100%; padding: .75rem; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 1rem; cursor: pointer; }
   #checkin button:hover { background: #1d4ed8; }
+  .ci-note { margin: 1rem 0 0; color: #b45309; }
   #ci-message { color: green; font-weight: bold; min-height: 1.2em; }
   #ci-list { padding-left: 1.2rem; }
   #ci-list li { margin: .4rem 0; }
@@ -32,39 +39,44 @@
 
 <script>
   (function () {
-    const KEY = "checkins";
+    const STUDENTS = "students";   // remembers each student: { id: {first, last} }
+    const CHECKINS = "checkins";   // every check-in: [{id, time}]
+
     const form = document.getElementById("checkin-form");
     const idInput = document.getElementById("ci-id");
-    const nameInput = document.getElementById("ci-name");
+    const newBox = document.getElementById("ci-new");
+    const firstInput = document.getElementById("ci-first");
+    const lastInput = document.getElementById("ci-last");
+    const button = document.getElementById("ci-button");
     const msg = document.getElementById("ci-message");
     const list = document.getElementById("ci-list");
     const count = document.getElementById("ci-count");
 
-    function load() {
-      try { return JSON.parse(localStorage.getItem(KEY)) || []; }
-      catch (e) { return []; }
+    function load(key, fallback) {
+      try { return JSON.parse(localStorage.getItem(key)) || fallback; }
+      catch (e) { return fallback; }
+    }
+    function save(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
     }
 
-    function save(data) {
-      try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
+    function showNewStudentFields(show) {
+      newBox.hidden = !show;
+      firstInput.required = show;
+      lastInput.required = show;
+      button.textContent = show ? "Save & Check In" : "Check In";
     }
-
-    // When a known student ID is typed, fill in their name automatically
-    idInput.addEventListener("input", function () {
-      const id = idInput.value.trim();
-      const match = load().find(c => c.id === id);
-      if (match) nameInput.value = match.name;
-    });
 
     function render() {
-      const data = load();
-      count.textContent = data.length;
+      const students = load(STUDENTS, {});
+      const checkins = load(CHECKINS, []);
+      count.textContent = checkins.length;
       list.innerHTML = "";
-      // newest first
-      data.slice().reverse().forEach(function (c) {
+      checkins.slice().reverse().forEach(function (c) {
+        const s = students[c.id] || { first: "Unknown", last: "" };
         const d = new Date(c.time);
         const li = document.createElement("li");
-        li.textContent = c.name + " (ID " + c.id + ") ";
+        li.textContent = s.first + " " + s.last + " (ID " + c.id + ") ";
         const when = document.createElement("small");
         when.textContent = "— " + d.toLocaleDateString() + " at " + d.toLocaleTimeString();
         li.appendChild(when);
@@ -72,26 +84,51 @@
       });
     }
 
+    // Hide the name fields again if they start typing a different ID
+    idInput.addEventListener("input", function () {
+      showNewStudentFields(false);
+      msg.textContent = "";
+    });
+
     form.addEventListener("submit", function (e) {
       e.preventDefault();
       const id = idInput.value.trim();
-      const name = nameInput.value.trim();
-      if (!id || !name) return;
+      if (!id) return;
 
-      const data = load();
+      const students = load(STUDENTS, {});
+
+      // New student: ask for first and last name before checking in
+      if (!students[id]) {
+        if (newBox.hidden) {
+          showNewStudentFields(true);
+          firstInput.focus();
+          return;
+        }
+        const first = firstInput.value.trim();
+        const last = lastInput.value.trim();
+        if (!first || !last) return;
+        students[id] = { first: first, last: last };
+        save(STUDENTS, students);
+      }
+
+      // Check them in
+      const checkins = load(CHECKINS, []);
       const now = Date.now();
-      data.push({ id: id, name: name, time: now });
-      save(data);
+      checkins.push({ id: id, time: now });
+      save(CHECKINS, checkins);
 
-      const visits = data.filter(c => c.id === id).length;
+      const s = students[id];
+      const visits = checkins.filter(c => c.id === id).length;
       const d = new Date(now);
       const when = d.toLocaleDateString() + " at " + d.toLocaleTimeString();
 
       msg.textContent = visits > 1
-        ? "Welcome back, " + name + "! Check-in #" + visits + " — " + when
-        : "Thanks, " + name + "! You're checked in — " + when;
+        ? "Welcome back, " + s.first + "! Check-in #" + visits + " — " + when
+        : "Welcome, " + s.first + "! You're checked in — " + when;
 
       form.reset();
+      showNewStudentFields(false);
+      idInput.focus();
       render();
     });
 
