@@ -1,0 +1,91 @@
+#check in part 
+<div id="checkin">
+  <h2>Check In</h2>
+
+  <form id="checkin-form">
+    <label for="ci-name">Name</label>
+    <input type="text" id="ci-name" required placeholder="Your full name">
+
+    <label for="ci-email">Email (optional)</label>
+    <input type="email" id="ci-email" placeholder="you@example.com">
+
+    <button type="submit">Check In</button>
+  </form>
+
+  <p id="ci-message"></p>
+
+  <h3>Checked in (<span id="ci-count">0</span>)</h3>
+  <ul id="ci-list"></ul>
+</div>
+
+<style>
+  #checkin { max-width: 400px; margin: 2rem auto; font-family: sans-serif; }
+  #checkin label { display: block; margin-top: 1rem; font-weight: bold; }
+  #checkin input { width: 100%; padding: .6rem; margin-top: .3rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
+  #checkin button { margin-top: 1rem; width: 100%; padding: .75rem; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 1rem; cursor: pointer; }
+  #checkin button:hover { background: #1d4ed8; }
+  #ci-message { color: green; font-weight: bold; min-height: 1.2em; }
+  #ci-list { padding-left: 1.2rem; }
+  #ci-list li { margin: .3rem 0; }
+  #ci-list small { color: #666; }
+</style>
+
+<script>
+  (function () {
+    const KEY = "checkins";
+    const form = document.getElementById("checkin-form");
+    const nameInput = document.getElementById("ci-name");
+    const emailInput = document.getElementById("ci-email");
+    const msg = document.getElementById("ci-message");
+    const list = document.getElementById("ci-list");
+    const count = document.getElementById("ci-count");
+
+    function load() {
+      try { return JSON.parse(localStorage.getItem(KEY)) || []; }
+      catch (e) { return []; }
+    }
+
+    function save(data) {
+      try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
+    }
+
+    function render() {
+      const data = load();
+      count.textContent = data.length;
+      list.innerHTML = "";
+      data.forEach(function (c) {
+        const li = document.createElement("li");
+        li.textContent = c.name + " ";
+        const time = document.createElement("small");
+        time.textContent = "— " + new Date(c.time).toLocaleString();
+        li.appendChild(time);
+        list.appendChild(li);
+      });
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      const name = nameInput.value.trim();
+      if (!name) return;
+
+      const data = load();
+      const already = data.some(c => c.name.toLowerCase() === name.toLowerCase());
+      if (already) {
+        msg.style.color = "#b45309";
+        msg.textContent = name + " is already checked in.";
+        return;
+      }
+
+      data.push({ name: name, email: emailInput.value.trim(), time: Date.now() });
+      save(data);
+
+      msg.style.color = "green";
+      msg.textContent = "Thanks, " + name + "! You're checked in.";
+      form.reset();
+      render();
+    });
+
+    render();
+  })();
+</script>
+
