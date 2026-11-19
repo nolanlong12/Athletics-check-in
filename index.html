@@ -1,4 +1,4 @@
-<!-- ===== CHECK-IN SECTION ===== -->
+<!-- ===== CHECK-IN SECTION (Supabase version) ===== -->
 <div id="checkin">
   <h2>Check In</h2>
 
@@ -30,17 +30,27 @@
   #checkin input { width: 100%; padding: .6rem; margin-top: .3rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
   #checkin button { margin-top: 1rem; width: 100%; padding: .75rem; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 1rem; cursor: pointer; }
   #checkin button:hover { background: #1d4ed8; }
+  #checkin button:disabled { background: #93a3c4; cursor: wait; }
   .ci-note { margin: 1rem 0 0; color: #b45309; }
   #ci-message { color: green; font-weight: bold; min-height: 1.2em; }
+  #ci-message.error { color: #b91c1c; }
   #ci-list { padding-left: 1.2rem; }
   #ci-list li { margin: .4rem 0; }
   #ci-list small { color: #666; }
 </style>
 
+<!-- Supabase library -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
 <script>
   (function () {
-    const STUDENTS = "students";   // remembers each student: { id: {first, last} }
-    const CHECKINS = "checkins";   // every check-in: [{id, time}]
+    // ---- PUT YOUR PROJECT'S VALUES HERE ----
+    // Supabase dashboard -> Project Settings -> API
+    const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+    const SUPABASE_KEY = "YOUR-ANON-OR-PUBLISHABLE-KEY";
+    // -----------------------------------------
+
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
     const form = document.getElementById("checkin-form");
     const idInput = document.getElementById("ci-id");
@@ -52,12 +62,14 @@
     const list = document.getElementById("ci-list");
     const count = document.getElementById("ci-count");
 
-    function load(key, fallback) {
-      try { return JSON.parse(localStorage.getItem(key)) || fallback; }
-      catch (e) { return fallback; }
+    function showMessage(text, isError) {
+      msg.textContent = text;
+      msg.classList.toggle("error", !!isError);
     }
-    function save(key, value) {
-      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+
+    function formatTime(iso) {
+      const d = new Date(iso);
+      return d.toLocaleDateString() + " at " + d.toLocaleTimeString();
     }
 
     function showNewStudentFields(show) {
@@ -67,18 +79,24 @@
       button.textContent = show ? "Save & Check In" : "Check In";
     }
 
-    function render() {
-      const students = load(STUDENTS, {});
-      const checkins = load(CHECKINS, []);
-      count.textContent = checkins.length;
+    // Load the check-in list from Supabase (newest first), with each student's name
+    async function render() {
+      const { data, error, count: total } = await db
+        .from("check_ins")
+        .select("student_id, checked_in_at, students(first_name, last_name)", { count: "exact" })
+        .order("checked_in_at", { ascending: false })
+        .limit(100);
+
+      if (error) { showMessage("Couldn't load check-ins: " + error.message, true); return; }
+
+      count.textContent = total ?? data.length;
       list.innerHTML = "";
-      checkins.slice().reverse().forEach(function (c) {
-        const s = students[c.id] || { first: "Unknown", last: "" };
-        const d = new Date(c.time);
+      data.forEach(function (c) {
+        const s = c.students || { first_name: "Unknown", last_name: "" };
         const li = document.createElement("li");
-        li.textContent = s.first + " " + s.last + " (ID " + c.id + ") ";
+        li.textContent = s.first_name + " " + s.last_name + " (ID " + c.student_id + ") ";
         const when = document.createElement("small");
-        when.textContent = "— " + d.toLocaleDateString() + " at " + d.toLocaleTimeString();
+        when.textContent = "— " + formatTime(c.checked_in_at);
         li.appendChild(when);
         list.appendChild(li);
       });
@@ -87,50 +105,78 @@
     // Hide the name fields again if they start typing a different ID
     idInput.addEventListener("input", function () {
       showNewStudentFields(false);
-      msg.textContent = "";
+      showMessage("");
     });
 
-    form.addEventListener("submit", function (e) {
+    form.addEventListener("submit", async function (e) {
       e.preventDefault();
       const id = idInput.value.trim();
       if (!id) return;
 
-      const students = load(STUDENTS, {});
+      button.disabled = true;
+      try {
+        // 1. Is this student already saved?
+        let { data: student, error } = await db
+          .from("students")
+          .select("student_id, first_name, last_name")
+          .eq("student_id", id)
+          .maybeSingle();
+        if (error) throw error;
 
-      // New student: ask for first and last name before checking in
-      if (!students[id]) {
-        if (newBox.hidden) {
-          showNewStudentFields(true);
-          firstInput.focus();
-          return;
+        // 2. New student: ask for first and last name, then save them
+        if (!student) {
+          if (newBox.hidden) {
+            showNewStudentFields(true);
+            firstInput.focus();
+            return;
+          }
+          const first = firstInput.value.trim();
+          const last = lastInput.value.trim();
+          if (!first || !last) return;
+
+          const res = await db
+            .from("students")
+            .insert({ student_id: id, first_name: first, last_name: last })
+            .select()
+            .single();
+          if (res.error) throw res.error;
+          student = res.data;
         }
-        const first = firstInput.value.trim();
-        const last = lastInput.value.trim();
-        if (!first || !last) return;
-        students[id] = { first: first, last: last };
-        save(STUDENTS, students);
+
+        // 3. Check them in (Supabase stamps the exact date and time)
+        const ins = await db
+          .from("check_ins")
+          .insert({ student_id: id })
+          .select("checked_in_at")
+          .single();
+        if (ins.error) throw ins.error;
+
+        // 4. How many times have they checked in?
+        const { count: visits } = await db
+          .from("check_ins")
+          .select("id", { count: "exact", head: true })
+          .eq("student_id", id);
+
+        const when = formatTime(ins.data.checked_in_at);
+        showMessage(visits > 1
+          ? "Welcome back, " + student.first_name + "! Check-in #" + visits + " — " + when
+          : "Welcome, " + student.first_name + "! You're checked in — " + when);
+
+        form.reset();
+        showNewStudentFields(false);
+        idInput.focus();
+        render();
+      } catch (err) {
+        showMessage("Something went wrong: " + err.message, true);
+      } finally {
+        button.disabled = false;
       }
-
-      // Check them in
-      const checkins = load(CHECKINS, []);
-      const now = Date.now();
-      checkins.push({ id: id, time: now });
-      save(CHECKINS, checkins);
-
-      const s = students[id];
-      const visits = checkins.filter(c => c.id === id).length;
-      const d = new Date(now);
-      const when = d.toLocaleDateString() + " at " + d.toLocaleTimeString();
-
-      msg.textContent = visits > 1
-        ? "Welcome back, " + s.first + "! Check-in #" + visits + " — " + when
-        : "Welcome, " + s.first + "! You're checked in — " + when;
-
-      form.reset();
-      showNewStudentFields(false);
-      idInput.focus();
-      render();
     });
+
+    // Live updates: refresh the list whenever anyone checks in on any device
+    db.channel("check-ins-live")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "check_ins" }, render)
+      .subscribe();
 
     render();
   })();
