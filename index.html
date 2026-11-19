@@ -1,21 +1,35 @@
-<!-- ===== CHECK-IN SECTION (Supabase version) ===== -->
+<!-- ===== CHECK-IN SECTION (Supabase + login) ===== -->
 <div id="checkin">
   <h2>Check In</h2>
 
-  <form id="checkin-form">
+  <!-- Step 1: enter student ID -->
+  <form id="ci-id-form">
     <label for="ci-id">Student ID</label>
     <input type="text" id="ci-id" required placeholder="Enter your student ID" autocomplete="off">
+    <button type="submit">Check In</button>
+  </form>
 
-    <!-- Only shown the first time a student checks in -->
-    <div id="ci-new" hidden>
-      <p class="ci-note">First time here? Tell us your name so we remember you.</p>
-      <label for="ci-first">First name</label>
-      <input type="text" id="ci-first" placeholder="First name">
-      <label for="ci-last">Last name</label>
-      <input type="text" id="ci-last" placeholder="Last name">
-    </div>
+  <!-- Step 3-4: ID not recognized, so log in to verify -->
+  <form id="ci-login-form" hidden>
+    <p class="ci-note" id="ci-login-note"></p>
+    <label for="ci-email">Email</label>
+    <input type="email" id="ci-email" required autocomplete="email">
+    <label for="ci-password">Password</label>
+    <input type="password" id="ci-password" required minlength="6" autocomplete="current-password">
+    <button type="submit">Log In</button>
+    <button type="button" id="ci-signup" class="ci-secondary">Create Account</button>
+    <button type="button" class="ci-cancel ci-link">Use a different ID</button>
+  </form>
 
-    <button type="submit" id="ci-button">Check In</button>
+  <!-- Step 5: confirm name, link ID to login, check in -->
+  <form id="ci-name-form" hidden>
+    <p class="ci-note" id="ci-name-note"></p>
+    <label for="ci-first">First name</label>
+    <input type="text" id="ci-first" required placeholder="First name">
+    <label for="ci-last">Last name</label>
+    <input type="text" id="ci-last" required placeholder="Last name">
+    <button type="submit">Save &amp; Check In</button>
+    <button type="button" class="ci-cancel ci-link">Cancel</button>
   </form>
 
   <p id="ci-message"></p>
@@ -31,6 +45,9 @@
   #checkin button { margin-top: 1rem; width: 100%; padding: .75rem; border: none; border-radius: 6px; background: #2563eb; color: #fff; font-size: 1rem; cursor: pointer; }
   #checkin button:hover { background: #1d4ed8; }
   #checkin button:disabled { background: #93a3c4; cursor: wait; }
+  #checkin button.ci-secondary { margin-top: .5rem; background: #fff; color: #2563eb; border: 1px solid #2563eb; }
+  #checkin button.ci-secondary:hover { background: #eff6ff; }
+  #checkin button.ci-link { margin-top: .5rem; background: none; color: #555; text-decoration: underline; padding: .4rem; }
   .ci-note { margin: 1rem 0 0; color: #b45309; }
   #ci-message { color: green; font-weight: bold; min-height: 1.2em; }
   #ci-message.error { color: #b91c1c; }
@@ -51,19 +68,39 @@
     // -----------------------------------------
 
     const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const PENDING_KEY = "ci-pending-id"; // remembers the ID while they log in
 
-    const form = document.getElementById("checkin-form");
+    const idForm = document.getElementById("ci-id-form");
     const idInput = document.getElementById("ci-id");
-    const newBox = document.getElementById("ci-new");
+    const loginForm = document.getElementById("ci-login-form");
+    const loginNote = document.getElementById("ci-login-note");
+    const emailInput = document.getElementById("ci-email");
+    const passwordInput = document.getElementById("ci-password");
+    const signupBtn = document.getElementById("ci-signup");
+    const nameForm = document.getElementById("ci-name-form");
+    const nameNote = document.getElementById("ci-name-note");
     const firstInput = document.getElementById("ci-first");
     const lastInput = document.getElementById("ci-last");
-    const button = document.getElementById("ci-button");
     const msg = document.getElementById("ci-message");
     const list = document.getElementById("ci-list");
     const count = document.getElementById("ci-count");
 
+    let pendingId = null;
+
+    // ---------- helpers ----------
+    function setPending(id) {
+      pendingId = id;
+      try {
+        if (id) sessionStorage.setItem(PENDING_KEY, id);
+        else sessionStorage.removeItem(PENDING_KEY);
+      } catch (e) {}
+    }
+    function storedPending() {
+      try { return sessionStorage.getItem(PENDING_KEY); } catch (e) { return null; }
+    }
+
     function showMessage(text, isError) {
-      msg.textContent = text;
+      msg.textContent = text || "";
       msg.classList.toggle("error", !!isError);
     }
 
@@ -72,14 +109,139 @@
       return d.toLocaleDateString() + " at " + d.toLocaleTimeString();
     }
 
-    function showNewStudentFields(show) {
-      newBox.hidden = !show;
-      firstInput.required = show;
-      lastInput.required = show;
-      button.textContent = show ? "Save & Check In" : "Check In";
+    function showStep(step) {
+      idForm.hidden = step !== "id";
+      loginForm.hidden = step !== "login";
+      nameForm.hidden = step !== "name";
+      const focusMap = { id: idInput, login: emailInput, name: firstInput };
+      focusMap[step].focus();
     }
 
-    // Load the check-in list from Supabase (newest first), with each student's name
+    // Disable a form's buttons while saving, and show any error nicely
+    async function busy(form, fn) {
+      const buttons = form.querySelectorAll("button");
+      buttons.forEach(b => b.disabled = true);
+      try { await fn(); }
+      catch (err) { showMessage(err.message || "Something went wrong.", true); }
+      finally { buttons.forEach(b => b.disabled = false); }
+    }
+
+    function welcome(r) {
+      const when = formatTime(r.checked_in_at);
+      showMessage(r.visits > 1
+        ? "Welcome back, " + r.first_name + " " + r.last_name + "! Check-in #" + r.visits + " — " + when
+        : "Welcome, " + r.first_name + " " + r.last_name + "! You're checked in — " + when);
+    }
+
+    // After a check-in: sign out (shared device), clear everything, back to step 1
+    async function finish() {
+      setPending(null);
+      idForm.reset(); loginForm.reset(); nameForm.reset();
+      await db.auth.signOut();
+      showStep("id");
+      render();
+    }
+
+    function goToLogin() {
+      loginNote.textContent = "We don't recognize ID " + pendingId +
+        " yet. Please log in (or create an account) to verify who you are. You only have to do this once.";
+      showStep("login");
+    }
+
+    function goToName(session) {
+      nameNote.textContent = "Signed in as " + session.user.email +
+        ". Enter your name to link this account to student ID " + pendingId + ".";
+      showStep("name");
+    }
+
+    // ---------- Step 1-2: enter ID; recognized IDs check in right away ----------
+    idForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      const id = idInput.value.trim();
+      if (!id) return;
+
+      busy(idForm, async function () {
+        showMessage("");
+        const { data, error } = await db.rpc("check_in", { p_student_id: id });
+        if (error) throw error;
+
+        if (data.status === "checked_in") {
+          welcome(data);
+          await finish();
+          return;
+        }
+
+        // Step 3: not recognized, so they need to log in
+        setPending(id);
+        const { data: { session } } = await db.auth.getSession();
+        if (session) goToName(session);
+        else goToLogin();
+      });
+    });
+
+    // ---------- Step 4: log in ----------
+    loginForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      busy(loginForm, async function () {
+        showMessage("");
+        const { data, error } = await db.auth.signInWithPassword({
+          email: emailInput.value.trim(),
+          password: passwordInput.value
+        });
+        if (error) throw error;
+        goToName(data.session);
+      });
+    });
+
+    // ...or create an account
+    signupBtn.addEventListener("click", function () {
+      if (!loginForm.reportValidity()) return;
+      busy(loginForm, async function () {
+        showMessage("");
+        const { data, error } = await db.auth.signUp({
+          email: emailInput.value.trim(),
+          password: passwordInput.value
+        });
+        if (error) throw error;
+        if (!data.session) {
+          // Supabase's "Confirm email" setting is on
+          showMessage("Account created! Check your email to confirm it, then come back and log in. " +
+                      "Your student ID (" + pendingId + ") is saved.");
+          passwordInput.value = "";
+          return;
+        }
+        goToName(data.session);
+      });
+    });
+
+    // ---------- Step 5: link ID to login, save info, check in ----------
+    nameForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      busy(nameForm, async function () {
+        showMessage("");
+        const { data, error } = await db.rpc("register_and_check_in", {
+          p_student_id: pendingId,
+          p_first_name: firstInput.value.trim(),
+          p_last_name: lastInput.value.trim()
+        });
+        if (error) throw error;
+        welcome(data);
+        await finish();
+      });
+    });
+
+    // Cancel buttons: start over with a different ID
+    document.querySelectorAll("#checkin .ci-cancel").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        setPending(null);
+        idForm.reset(); loginForm.reset(); nameForm.reset();
+        showMessage("");
+        await db.auth.signOut();
+        showStep("id");
+      });
+    });
+
+    // ---------- Check-in list ----------
     async function render() {
       const { data, error, count: total } = await db
         .from("check_ins")
@@ -102,83 +264,25 @@
       });
     }
 
-    // Hide the name fields again if they start typing a different ID
-    idInput.addEventListener("input", function () {
-      showNewStudentFields(false);
-      showMessage("");
-    });
-
-    form.addEventListener("submit", async function (e) {
-      e.preventDefault();
-      const id = idInput.value.trim();
-      if (!id) return;
-
-      button.disabled = true;
-      try {
-        // 1. Is this student already saved?
-        let { data: student, error } = await db
-          .from("students")
-          .select("student_id, first_name, last_name")
-          .eq("student_id", id)
-          .maybeSingle();
-        if (error) throw error;
-
-        // 2. New student: ask for first and last name, then save them
-        if (!student) {
-          if (newBox.hidden) {
-            showNewStudentFields(true);
-            firstInput.focus();
-            return;
-          }
-          const first = firstInput.value.trim();
-          const last = lastInput.value.trim();
-          if (!first || !last) return;
-
-          const res = await db
-            .from("students")
-            .insert({ student_id: id, first_name: first, last_name: last })
-            .select()
-            .single();
-          if (res.error) throw res.error;
-          student = res.data;
-        }
-
-        // 3. Check them in (Supabase stamps the exact date and time)
-        const ins = await db
-          .from("check_ins")
-          .insert({ student_id: id })
-          .select("checked_in_at")
-          .single();
-        if (ins.error) throw ins.error;
-
-        // 4. How many times have they checked in?
-        const { count: visits } = await db
-          .from("check_ins")
-          .select("id", { count: "exact", head: true })
-          .eq("student_id", id);
-
-        const when = formatTime(ins.data.checked_in_at);
-        showMessage(visits > 1
-          ? "Welcome back, " + student.first_name + "! Check-in #" + visits + " — " + when
-          : "Welcome, " + student.first_name + "! You're checked in — " + when);
-
-        form.reset();
-        showNewStudentFields(false);
-        idInput.focus();
-        render();
-      } catch (err) {
-        showMessage("Something went wrong: " + err.message, true);
-      } finally {
-        button.disabled = false;
-      }
-    });
-
     // Live updates: refresh the list whenever anyone checks in on any device
     db.channel("check-ins-live")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "check_ins" }, render)
       .subscribe();
 
-    render();
+    // ---------- Start ----------
+    // If they were in the middle of logging in (e.g. page reloaded), pick up where they left off
+    (async function start() {
+      const saved = storedPending();
+      if (saved) {
+        pendingId = saved;
+        const { data: { session } } = await db.auth.getSession();
+        if (session) goToName(session);
+        else goToLogin();
+      } else {
+        showStep("id");
+      }
+      render();
+    })();
   })();
 </script>
 <!-- ===== END CHECK-IN SECTION ===== -->
